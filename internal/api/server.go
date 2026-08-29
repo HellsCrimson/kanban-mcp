@@ -31,6 +31,9 @@ func Register(mux *http.ServeMux, s *store.Store) {
 	mux.HandleFunc("PATCH /api/cards/{id}", h.updateCard)
 	mux.HandleFunc("POST /api/cards/{id}/move", h.moveCard)
 	mux.HandleFunc("DELETE /api/cards/{id}", h.deleteCard)
+	mux.HandleFunc("POST /api/cards/{id}/updates", h.addUpdate)
+	mux.HandleFunc("GET /api/cards/{id}/updates", h.listUpdates)
+	mux.HandleFunc("POST /api/relationships", h.addRelationship)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -294,4 +297,51 @@ func (h *handlers) deleteCard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(204)
+}
+
+type addUpdateReq struct {
+	Content string `json:"content"`
+}
+
+func (h *handlers) addUpdate(w http.ResponseWriter, r *http.Request) {
+	var req addUpdateReq
+	if err := decode(r, &req); err != nil {
+		fail(w, store.ErrInvalid)
+		return
+	}
+	u, err := h.store.AddUpdate(r.Context(), r.PathValue("id"), req.Content)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, 201, u)
+}
+
+func (h *handlers) listUpdates(w http.ResponseWriter, r *http.Request) {
+	updates, err := h.store.ListUpdates(r.Context(), r.PathValue("id"))
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, 200, updates)
+}
+
+type addRelationshipReq struct {
+	SourceID string             `json:"source_id"`
+	TargetID string             `json:"target_id"`
+	Type     model.RelationType `json:"type"`
+}
+
+func (h *handlers) addRelationship(w http.ResponseWriter, r *http.Request) {
+	var req addRelationshipReq
+	if err := decode(r, &req); err != nil {
+		fail(w, store.ErrInvalid)
+		return
+	}
+	rel, err := h.store.AddRelationship(r.Context(), req.SourceID, req.TargetID, req.Type)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, 201, rel)
 }

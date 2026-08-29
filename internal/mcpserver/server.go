@@ -30,8 +30,9 @@ func NewHandler(s *store.Store) http.Handler {
 	}, t.getProject)
 
 	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "get_card",
-		Description: "Get a single card. If the card is an epic, its sub-cards are included with their column name and done status.",
+		Name: "get_card",
+		Description: "Get a single card. Includes the card's updates (comments) and relationships. " +
+			"If the card is an epic, its sub-cards are included with their column name and done status.",
 	}, t.getCard)
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -76,6 +77,22 @@ func NewHandler(s *store.Store) http.Handler {
 		Name:        "delete_card",
 		Description: "Delete a card. Sub-cards of an epic are deleted together with it.",
 	}, t.deleteCard)
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "add_update",
+		Description: "Add a comment/update note to a card.",
+	}, t.addUpdate)
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "list_updates",
+		Description: "List all comments/updates on a card, oldest first.",
+	}, t.listUpdates)
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "add_relationship",
+		Description: "Link two cards of the same project. type is 'blocks' (source blocks target), " +
+			"'depends_on' (source depends on target) or 'relates_to' (symmetric). Fails if the link already exists.",
+	}, t.addRelationship)
 
 	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, &mcp.StreamableHTTPOptions{Stateless: true})
 }
@@ -264,4 +281,37 @@ func (t *tools) deleteCard(ctx context.Context, _ *mcp.CallToolRequest, in cardI
 		return nil, nil, err
 	}
 	return nil, map[string]string{"message": "card deleted"}, nil
+}
+
+type addUpdateIn struct {
+	CardID  string `json:"card_id"`
+	Content string `json:"content"`
+}
+
+func (t *tools) addUpdate(ctx context.Context, _ *mcp.CallToolRequest, in addUpdateIn) (*mcp.CallToolResult, *model.Update, error) {
+	u, err := t.store.AddUpdate(ctx, in.CardID, in.Content)
+	return nil, u, err
+}
+
+type listUpdatesOut struct {
+	Updates []model.Update `json:"updates"`
+}
+
+func (t *tools) listUpdates(ctx context.Context, _ *mcp.CallToolRequest, in cardIDIn) (*mcp.CallToolResult, listUpdatesOut, error) {
+	updates, err := t.store.ListUpdates(ctx, in.CardID)
+	if updates == nil {
+		updates = []model.Update{}
+	}
+	return nil, listUpdatesOut{Updates: updates}, err
+}
+
+type addRelationshipIn struct {
+	SourceID string             `json:"source_id"`
+	TargetID string             `json:"target_id"`
+	Type     model.RelationType `json:"type"`
+}
+
+func (t *tools) addRelationship(ctx context.Context, _ *mcp.CallToolRequest, in addRelationshipIn) (*mcp.CallToolResult, *model.Relationship, error) {
+	r, err := t.store.AddRelationship(ctx, in.SourceID, in.TargetID, in.Type)
+	return nil, r, err
 }

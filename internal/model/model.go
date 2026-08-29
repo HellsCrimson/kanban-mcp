@@ -77,9 +77,55 @@ type Subcard struct {
 	Done       bool   `json:"done"`
 }
 
+type Update struct {
+	ID        string    `json:"id"`
+	CardID    string    `json:"card_id"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type RelationType string
+
+const (
+	RelBlocks    RelationType = "blocks"
+	RelDependsOn RelationType = "depends_on"
+	RelRelatesTo RelationType = "relates_to"
+)
+
+var RelationTypes = []RelationType{RelBlocks, RelDependsOn, RelRelatesTo}
+
+func (t RelationType) Valid() bool {
+	for _, v := range RelationTypes {
+		if t == v {
+			return true
+		}
+	}
+	return false
+}
+
+type Relationship struct {
+	ID        string       `json:"id"`
+	SourceID  string       `json:"source_id"`
+	TargetID  string       `json:"target_id"`
+	Type      RelationType `json:"type"`
+	CreatedAt time.Time    `json:"created_at"`
+}
+
+// RelatedCard is one end of a relationship as seen from a card in CardDetail.
+// Direction is "outgoing" when the detail card is the source, "incoming" otherwise.
+type RelatedCard struct {
+	ID        string       `json:"id"`
+	Number    int          `json:"number"`
+	Title     string       `json:"title"`
+	Type      RelationType `json:"type"`
+	Direction string       `json:"direction"`
+}
+
 type CardDetail struct {
-	Card     BoardCard `json:"card"`
-	Subcards []Subcard `json:"subcards,omitempty"`
+	Card          BoardCard     `json:"card"`
+	Subcards      []Subcard     `json:"subcards,omitempty"`
+	Updates       []Update      `json:"updates,omitempty"`
+	Relationships []RelatedCard `json:"relationships,omitempty"`
 }
 
 type ColumnCards struct {

@@ -55,6 +55,23 @@ CREATE TABLE IF NOT EXISTS cards (
 CREATE INDEX IF NOT EXISTS idx_cards_project ON cards(project_id);
 CREATE INDEX IF NOT EXISTS idx_cards_column ON cards(column_id, position);
 CREATE INDEX IF NOT EXISTS idx_cards_parent ON cards(parent_id);
+CREATE TABLE IF NOT EXISTS card_updates (
+	id TEXT PRIMARY KEY,
+	card_id TEXT NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+	content TEXT NOT NULL,
+	created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_card_updates_card ON card_updates(card_id, created_at);
+CREATE TABLE IF NOT EXISTS relationships (
+	id TEXT PRIMARY KEY,
+	source_id TEXT NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+	target_id TEXT NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+	type TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	UNIQUE (source_id, target_id, type)
+);
+CREATE INDEX IF NOT EXISTS idx_relationships_source ON relationships(source_id);
+CREATE INDEX IF NOT EXISTS idx_relationships_target ON relationships(target_id);
 `
 
 type Store struct {
@@ -548,6 +565,16 @@ func (s *Store) GetCardDetail(ctx context.Context, id string) (*model.CardDetail
 		return nil, err
 	}
 	detail := &model.CardDetail{Card: model.BoardCard{Card: *c}}
+	updates, err := s.ListUpdates(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	detail.Updates = updates
+	rels, err := s.cardRelationships(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	detail.Relationships = rels
 	if c.Type == model.CardTypeEpic {
 		lastCol, _ := s.lastColumnID(ctx, c.ProjectID)
 		progress, err := s.subProgress(ctx, c.ProjectID)
@@ -784,4 +811,119 @@ func (s *Store) GetBoard(ctx context.Context, projectID string) (*model.Board, e
 		b.Columns = append(b.Columns, cc)
 	}
 	return b, nil
+}
+
+func (s *Store) AddUpdate(ctx context.Context, cardID, content string) (*model.Update, error) {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return nil, fmt.Errorf("%w: content is required", ErrInvalid)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.GetCard(ctx, cardID); err != nil {
+		return nil, err
+	}
+	id := newID()
+	ts := now()
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO card_updates (id, card_id, content, created_at) VALUES (?, ?, ?, ?)`, id, cardID, content, ts); err != nil {
+		return nil, err
+	}
+	u := model.Update{ID: id, CardID: cardID, Content: content}
+	u.CreatedAt, _ = time.Parse(time.RFC3339, ts)
+	return &u, nil
+}
+
+func (s *Store) ListUpdates(ctx context.Context, cardID string) ([]model.Update, error) {
+	if _, err := s.GetCard(ctx, cardID); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, card_id, content, created_at FROM card_updates WHERE card_id = ? ORDER BY rowid`, cardID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.Update{}
+	for rows.Next() {
+		var u model.Update
+		var created string
+		if err := rows.Scan(&u.ID, &u.CardID, &u.Content, &created); err != nil {
+			return nil, err
+		}
+		u.CreatedAt, _ = time.Parse(time.RFC3339, created)
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) AddRelationship(ctx context.Context, sourceID, targetID string, relType model.RelationType) (*model.Relationship, error) {
+	if sourceID == "" || targetID == "" {
+		return nil, fmt.Errorf("%w: source_id and target_id are required", ErrInvalid)
+	}
+	if !relType.Valid() {
+		return nil, fmt.Errorf("%w: type must be one of blocks, depends_on, relates_to", ErrInvalid)
+	}
+	if sourceID == targetID {
+		return nil, fmt.Errorf("%w: a card cannot be related to itself", ErrInvalid)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	src, err := s.GetCard(ctx, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	tgt, err := s.GetCard(ctx, targetID)
+	if err != nil {
+		return nil, err
+	}
+	if src.ProjectID != tgt.ProjectID {
+		return nil, fmt.Errorf("%w: cards must belong to the same project", ErrInvalid)
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM relationships WHERE source_id = ? AND target_id = ? AND type = ?`, sourceID, targetID, string(relType)).Scan(&n); err != nil {
+		return nil, err
+	}
+	if relType == model.RelRelatesTo {
+		var m int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM relationships WHERE source_id = ? AND target_id = ? AND type = ?`, targetID, sourceID, string(model.RelRelatesTo)).Scan(&m); err != nil {
+			return nil, err
+		}
+		n += m
+	}
+	if n > 0 {
+		return nil, fmt.Errorf("%w: relationship already exists", ErrConflict)
+	}
+	id := newID()
+	ts := now()
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO relationships (id, source_id, target_id, type, created_at) VALUES (?, ?, ?, ?, ?)`, id, sourceID, targetID, string(relType), ts); err != nil {
+		return nil, err
+	}
+	r := model.Relationship{ID: id, SourceID: sourceID, TargetID: targetID, Type: relType}
+	r.CreatedAt, _ = time.Parse(time.RFC3339, ts)
+	return &r, nil
+}
+
+func (s *Store) cardRelationships(ctx context.Context, cardID string) ([]model.RelatedCard, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT r.type,
+		       CASE WHEN r.source_id = ? THEN 'outgoing' ELSE 'incoming' END,
+		       c.id, c.number, c.title
+		FROM relationships r
+		JOIN cards c ON c.id = CASE WHEN r.source_id = ? THEN r.target_id ELSE r.source_id END
+		WHERE r.source_id = ? OR r.target_id = ?
+		ORDER BY r.rowid`, cardID, cardID, cardID, cardID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.RelatedCard{}
+	for rows.Next() {
+		var rc model.RelatedCard
+		var typ string
+		if err := rows.Scan(&typ, &rc.Direction, &rc.ID, &rc.Number, &rc.Title); err != nil {
+			return nil, err
+		}
+		rc.Type = model.RelationType(typ)
+		out = append(out, rc)
+	}
+	return out, rows.Err()
 }

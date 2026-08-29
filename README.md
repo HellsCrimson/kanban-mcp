@@ -12,6 +12,7 @@ A self-hosted kanban board with a REST API, a React frontend, and an [MCP](https
 - Cards have a per-project number (`#1`, `#2`, …), title, description, complexity (1–10), and priority (`low` / `medium` / `high` / `urgent`)
 - Two card types: regular **tasks** and **epics**. Epics can have sub-cards; sub-cards move independently in any column and the epic shows progress (`2/5`, where "done" means the sub-card is in the project's last column)
 - Drag & drop cards between columns and reorder within a column
+- Cards can have updates (comments) and be linked to other cards with relationships: `blocks`, `depends_on`, `relates_to`
 - Everything is available through the REST API and as MCP tools
 
 ## Quick start
@@ -56,13 +57,15 @@ The MCP server is served at `http://localhost:8080/mcp` (streamable HTTP, statel
 | `list_projects` | List all projects |
 | `create_project` | Create a project (initialized with the default columns) |
 | `get_project` | Full board state: all columns and cards |
-| `get_card` | One card; epics include their sub-cards with column + done status |
+| `get_card` | One card incl. its updates and relationships; epics also include their sub-cards with column + done status |
 | `list_cards` | Cards of a project, filterable by column / type / parent |
 | `create_card` | Create a task or epic; `parent_id` creates a sub-card of an epic |
 | `update_card` | Update title, description, complexity, priority, type |
 | `move_card` | Move a card to a column, optionally at a 0-based position |
 | `add_column` / `update_column` / `delete_column` | Manage custom columns |
 | `delete_card` | Delete a card (sub-cards of an epic go with it) |
+| `add_update` / `list_updates` | Add a comment to a card / list its comments (oldest first) |
+| `add_relationship` | Link two cards of the same project: `blocks`, `depends_on`, `relates_to` |
 
 ## REST API
 
@@ -80,6 +83,9 @@ GET    /api/cards/{id}                # detail; epics include sub-cards
 PATCH  /api/cards/{id}                # any of title/description/complexity/priority/type
 POST   /api/cards/{id}/move           # {"column_id", "position"?}
 DELETE /api/cards/{id}
+POST   /api/cards/{id}/updates        # {"content": "..."}
+GET    /api/cards/{id}/updates        # list, oldest first
+POST   /api/relationships             # {"source_id", "target_id", "type": "blocks"|"depends_on"|"relates_to"}
 ```
 
 ## Notes
@@ -87,4 +93,5 @@ DELETE /api/cards/{id}
 - Data lives in a single SQLite file (WAL mode). Back it up by copying the file.
 - Card numbers are plain per-project counters and are never reused.
 - An epic with sub-cards cannot be converted back to a task; delete the sub-cards first.
+- Relationships only link cards within the same project; `relates_to` is symmetric (A↔B counts as one link). Deleting a card removes its updates and relationships.
 - The MCP endpoint has permissive CORS so browser-based MCP clients can reach it.
