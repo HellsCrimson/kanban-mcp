@@ -87,6 +87,7 @@ export default function Board({ projectId, onBack }) {
         <CardModal
           initial={modal}
           columns={board.columns.map((c) => c.column)}
+          cards={board.columns.flatMap((cc) => cc.cards)}
           onClose={() => setModal(null)}
           onChanged={() => {
             load()

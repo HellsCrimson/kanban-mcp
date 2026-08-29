@@ -2,8 +2,22 @@ import { useEffect, useState } from 'react'
 import { api } from '../api.js'
 
 const PRIORITIES = ['low', 'medium', 'high', 'urgent']
+const REL_TYPES = [
+  ['blocks', 'blocks'],
+  ['depends_on', 'depends on'],
+  ['relates_to', 'relates to'],
+]
 
-export default function CardModal({ initial, columns, onClose, onChanged, onOpenCard }) {
+function relLabel(rc) {
+  const other = `#${rc.number} ${rc.title}`
+  if (rc.type === 'relates_to') return `related to ${other}`
+  if (rc.direction === 'outgoing') {
+    return rc.type === 'blocks' ? `blocks ${other}` : `depends on ${other}`
+  }
+  return rc.type === 'blocks' ? `blocked by ${other}` : `depended on by ${other}`
+}
+
+export default function CardModal({ initial, columns, cards, onClose, onChanged, onOpenCard }) {
   const isCreate = initial.mode === 'create'
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
@@ -13,6 +27,9 @@ export default function CardModal({ initial, columns, onClose, onChanged, onOpen
   const [detail, setDetail] = useState(null)
   const [subTitle, setSubTitle] = useState('')
   const [subColumn, setSubColumn] = useState('')
+  const [comment, setComment] = useState('')
+  const [relType, setRelType] = useState('blocks')
+  const [relTarget, setRelTarget] = useState('')
   const [error, setError] = useState('')
 
   useEffect(() => {
@@ -94,7 +111,47 @@ export default function CardModal({ initial, columns, onClose, onChanged, onOpen
     }
   }
 
+  async function refresh() {
+    setDetail(await api.card(initial.cardId))
+  }
+
+  async function addComment() {
+    if (!comment.trim()) return
+    setError('')
+    try {
+      await api.addUpdate(initial.cardId, comment.trim())
+      setComment('')
+      await refresh()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  async function addRelationship() {
+    if (!relTarget) return
+    setError('')
+    try {
+      await api.addRelationship({ source_id: initial.cardId, target_id: relTarget, type: relType })
+      setRelTarget('')
+      await refresh()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  async function removeRelationship(relId) {
+    try {
+      await api.deleteRelationship(relId)
+      await refresh()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
   const isEpic = type === 'epic'
+  const targetCards = (cards || [])
+    .filter((c) => c.id !== initial.cardId)
+    .sort((a, b) => a.number - b.number)
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -169,6 +226,67 @@ export default function CardModal({ initial, columns, onClose, onChanged, onOpen
                   ))}
                 </select>
                 <button type="button" disabled={!subTitle.trim()} onClick={addSubcard}>Add</button>
+              </div>
+            </div>
+          )}
+
+          {!isCreate && detail && (
+            <div className="section">
+              <div className="section-header">Updates</div>
+              {detail.updates?.length ? (
+                detail.updates.map((u) => (
+                  <div key={u.id} className="update-item">
+                    <div className="update-content">{u.content}</div>
+                    <div className="muted">{new Date(u.created_at).toLocaleString()}</div>
+                  </div>
+                ))
+              ) : (
+                <div className="muted">No updates yet.</div>
+              )}
+              <div className="section-form">
+                <textarea
+                  rows="2"
+                  value={comment}
+                  onChange={(e) => setComment(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault()
+                      addComment()
+                    }
+                  }}
+                  placeholder="Add a comment… (Enter to submit)"
+                />
+                <button type="button" disabled={!comment.trim()} onClick={addComment}>Add</button>
+              </div>
+            </div>
+          )}
+
+          {!isCreate && detail && (
+            <div className="section">
+              <div className="section-header">Relationships</div>
+              {detail.relationships?.length ? (
+                detail.relationships.map((rc) => (
+                  <div key={rc.rel_id} className="rel-row">
+                    <span className="rel-text" onClick={() => onOpenCard(rc.card_id)}>{relLabel(rc)}</span>
+                    <button type="button" className="icon-btn" title="Remove link" onClick={() => removeRelationship(rc.rel_id)}>×</button>
+                  </div>
+                ))
+              ) : (
+                <div className="muted">No relationships yet.</div>
+              )}
+              <div className="section-form">
+                <select value={relType} onChange={(e) => setRelType(e.target.value)}>
+                  {REL_TYPES.map(([value, label]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+                </select>
+                <select value={relTarget} onChange={(e) => setRelTarget(e.target.value)}>
+                  <option value="">Link to…</option>
+                  {targetCards.map((c) => (
+                    <option key={c.id} value={c.id}>#{c.number} {c.title}</option>
+                  ))}
+                </select>
+                <button type="button" disabled={!relTarget} onClick={addRelationship}>Add</button>
               </div>
             </div>
           )}

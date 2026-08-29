@@ -86,6 +86,7 @@ DELETE /api/cards/{id}
 POST   /api/cards/{id}/updates        # {"content": "..."}
 GET    /api/cards/{id}/updates        # list, oldest first
 POST   /api/relationships             # {"source_id", "target_id", "type": "blocks"|"depends_on"|"relates_to"}
+DELETE /api/relationships/{id}        # remove a link (id from the card detail's relationships)
 ```
 
 ## Notes

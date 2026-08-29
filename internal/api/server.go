@@ -34,6 +34,7 @@ func Register(mux *http.ServeMux, s *store.Store) {
 	mux.HandleFunc("POST /api/cards/{id}/updates", h.addUpdate)
 	mux.HandleFunc("GET /api/cards/{id}/updates", h.listUpdates)
 	mux.HandleFunc("POST /api/relationships", h.addRelationship)
+	mux.HandleFunc("DELETE /api/relationships/{id}", h.deleteRelationship)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -344,4 +345,12 @@ func (h *handlers) addRelationship(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 201, rel)
+}
+
+func (h *handlers) deleteRelationship(w http.ResponseWriter, r *http.Request) {
+	if err := h.store.DeleteRelationship(r.Context(), r.PathValue("id")); err != nil {
+		fail(w, err)
+		return
+	}
+	w.WriteHeader(204)
 }

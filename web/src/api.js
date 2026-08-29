@@ -31,4 +31,7 @@ export const api = {
   updateCard: (id, patch) => json('PATCH', `/api/cards/${id}`, patch),
   moveCard: (id, columnId, position) => json('POST', `/api/cards/${id}/move`, { column_id: columnId, position }),
   deleteCard: (id) => json('DELETE', `/api/cards/${id}`),
+  addUpdate: (cardId, content) => json('POST', `/api/cards/${cardId}/updates`, { content }),
+  addRelationship: (data) => json('POST', '/api/relationships', data),
+  deleteRelationship: (id) => json('DELETE', `/api/relationships/${id}`),
 }

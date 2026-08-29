@@ -904,7 +904,8 @@ func (s *Store) AddRelationship(ctx context.Context, sourceID, targetID string, 
 
 func (s *Store) cardRelationships(ctx context.Context, cardID string) ([]model.RelatedCard, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT r.type,
+		SELECT r.id,
+		       r.type,
 		       CASE WHEN r.source_id = ? THEN 'outgoing' ELSE 'incoming' END,
 		       c.id, c.number, c.title
 		FROM relationships r
@@ -919,11 +920,24 @@ func (s *Store) cardRelationships(ctx context.Context, cardID string) ([]model.R
 	for rows.Next() {
 		var rc model.RelatedCard
 		var typ string
-		if err := rows.Scan(&typ, &rc.Direction, &rc.ID, &rc.Number, &rc.Title); err != nil {
+		if err := rows.Scan(&rc.RelID, &typ, &rc.Direction, &rc.CardID, &rc.Number, &rc.Title); err != nil {
 			return nil, err
 		}
 		rc.Type = model.RelationType(typ)
 		out = append(out, rc)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) DeleteRelationship(ctx context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.ExecContext(ctx, `DELETE FROM relationships WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

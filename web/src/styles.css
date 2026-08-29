@@ -511,3 +511,78 @@ textarea {
   width: auto;
   flex-shrink: 0;
 }
+
+/* Updates & relationships */
+
+.section {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.section-header {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.update-item {
+  background: var(--panel-2);
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.update-content {
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.section-form {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.section-form textarea {
+  flex: 1;
+}
+
+.section-form select {
+  width: auto;
+  flex: 1;
+}
+
+.section-form button {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.rel-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: var(--panel-2);
+  border-radius: 6px;
+}
+
+.rel-text {
+  flex: 1;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rel-text:hover {
+  color: var(--accent);
+}

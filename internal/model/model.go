@@ -112,9 +112,11 @@ type Relationship struct {
 }
 
 // RelatedCard is one end of a relationship as seen from a card in CardDetail.
+// CardID identifies the other card; RelID is the relationship row (for deletion).
 // Direction is "outgoing" when the detail card is the source, "incoming" otherwise.
 type RelatedCard struct {
-	ID        string       `json:"id"`
+	RelID     string       `json:"rel_id"`
+	CardID    string       `json:"card_id"`
 	Number    int          `json:"number"`
 	Title     string       `json:"title"`
 	Type      RelationType `json:"type"`
