@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS board_columns (
 	id TEXT PRIMARY KEY,
 	project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
 	name TEXT NOT NULL,
-	position INTEGER NOT NULL
+	position INTEGER NOT NULL,
+	is_done INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_board_columns_project ON board_columns(project_id, position);
 CREATE TABLE IF NOT EXISTS cards (
@@ -77,6 +78,9 @@ CREATE INDEX IF NOT EXISTS idx_relationships_target ON relationships(target_id);
 type Store struct {
 	db *sql.DB
 	mu sync.Mutex
+
+	subMu sync.Mutex
+	subs  map[*subscriber]struct{}
 }
 
 func Open(path string) (*Store, error) {
@@ -90,7 +94,50 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
-	return &Store{db: db}, nil
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	return &Store{db: db, subs: map[*subscriber]struct{}{}}, nil
+}
+
+// migrate applies schema changes that CREATE TABLE IF NOT EXISTS cannot express.
+func migrate(db *sql.DB) error {
+	has, err := hasColumn(db, "board_columns", "is_done")
+	if err != nil {
+		return err
+	}
+	if !has {
+		if _, err := db.Exec(`ALTER TABLE board_columns ADD COLUMN is_done INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+		// Before is_done existed, the last column was implicitly the "done"
+		// column; keep that meaning for existing boards.
+		if _, err := db.Exec(`UPDATE board_columns SET is_done = 1 WHERE position = (
+			SELECT MAX(position) FROM board_columns o WHERE o.project_id = board_columns.project_id
+		)`); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func hasColumn(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -158,12 +205,14 @@ func (s *Store) CreateProject(ctx context.Context, name, description string) (*m
 		return nil, err
 	}
 	for i, colName := range model.DefaultColumns {
-		if _, err := s.db.ExecContext(ctx, `INSERT INTO board_columns (id, project_id, name, position) VALUES (?, ?, ?, ?)`, newID(), id, colName, i); err != nil {
+		done := i == len(model.DefaultColumns)-1
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO board_columns (id, project_id, name, position, is_done) VALUES (?, ?, ?, ?, ?)`, newID(), id, colName, i, done); err != nil {
 			return nil, err
 		}
 	}
 	p := model.Project{ID: id, Name: name, Description: description}
 	p.CreatedAt, _ = time.Parse(time.RFC3339, ts)
+	s.notify(id, "projects")
 	return &p, nil
 }
 
@@ -208,6 +257,7 @@ func (s *Store) UpdateProject(ctx context.Context, id string, name, description 
 	if n, _ := res.RowsAffected(); n == 0 {
 		return nil, ErrNotFound
 	}
+	s.notify(id, "projects")
 	return s.GetProject(ctx, id)
 }
 
@@ -221,11 +271,12 @@ func (s *Store) DeleteProject(ctx context.Context, id string) error {
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
 	}
+	s.notify(id, "projects")
 	return nil
 }
 
 func (s *Store) ListColumns(ctx context.Context, projectID string) ([]model.Column, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, project_id, name, position FROM board_columns WHERE project_id = ? ORDER BY position`, projectID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, project_id, name, position, is_done FROM board_columns WHERE project_id = ? ORDER BY position`, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -233,7 +284,7 @@ func (s *Store) ListColumns(ctx context.Context, projectID string) ([]model.Colu
 	out := []model.Column{}
 	for rows.Next() {
 		var c model.Column
-		if err := rows.Scan(&c.ID, &c.ProjectID, &c.Name, &c.Position); err != nil {
+		if err := rows.Scan(&c.ID, &c.ProjectID, &c.Name, &c.Position, &c.IsDone); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
@@ -260,17 +311,25 @@ func (s *Store) CreateColumn(ctx context.Context, projectID, name string) (*mode
 		pos = int(maxPos.Int64) + 1
 	}
 	col := model.Column{ID: newID(), ProjectID: projectID, Name: name, Position: pos}
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO board_columns (id, project_id, name, position) VALUES (?, ?, ?, ?)`, col.ID, col.ProjectID, col.Name, col.Position); err != nil {
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO board_columns (id, project_id, name, position, is_done) VALUES (?, ?, ?, ?, 0)`, col.ID, col.ProjectID, col.Name, col.Position); err != nil {
 		return nil, err
 	}
+	s.notify(projectID, "board")
 	return &col, nil
 }
 
-func (s *Store) UpdateColumn(ctx context.Context, id string, name, position *string, pos *int) (*model.Column, error) {
+type ColumnUpdate struct {
+	Name     *string
+	Position *int
+	IsDone   *bool
+}
+
+func (s *Store) UpdateColumn(ctx context.Context, id string, u ColumnUpdate) (*model.Column, error) {
+	name, pos := u.Name, u.Position
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var col model.Column
-	err := s.db.QueryRowContext(ctx, `SELECT id, project_id, name, position FROM board_columns WHERE id = ?`, id).Scan(&col.ID, &col.ProjectID, &col.Name, &col.Position)
+	err := s.db.QueryRowContext(ctx, `SELECT id, project_id, name, position, is_done FROM board_columns WHERE id = ?`, id).Scan(&col.ID, &col.ProjectID, &col.Name, &col.Position, &col.IsDone)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -312,12 +371,27 @@ func (s *Store) UpdateColumn(ctx context.Context, id string, name, position *str
 			return nil, err
 		}
 	}
+	if u.IsDone != nil {
+		if _, err := s.db.ExecContext(ctx, `UPDATE board_columns SET is_done = ? WHERE id = ?`, *u.IsDone, col.ID); err != nil {
+			return nil, err
+		}
+		col.IsDone = *u.IsDone
+	}
+	s.notify(col.ProjectID, "board")
 	return &col, nil
 }
 
 func (s *Store) DeleteColumn(ctx context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var projectID string
+	err := s.db.QueryRowContext(ctx, `SELECT project_id FROM board_columns WHERE id = ?`, id).Scan(&projectID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
 	var n int
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM cards WHERE column_id = ?`, id).Scan(&n); err != nil {
 		return err
@@ -325,12 +399,30 @@ func (s *Store) DeleteColumn(ctx context.Context, id string) error {
 	if n > 0 {
 		return fmt.Errorf("%w: column has %d cards", ErrConflict, n)
 	}
-	res, err := s.db.ExecContext(ctx, `DELETE FROM board_columns WHERE id = ?`, id)
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM board_columns WHERE id = ?`, id); err != nil {
+		return err
+	}
+	if err := s.resequenceColumns(ctx, projectID); err != nil {
+		return err
+	}
+	s.notify(projectID, "board")
+	return nil
+}
+
+// resequenceColumns rewrites positions as 0..n-1 so a deletion never leaves a
+// gap that would make a later position index ambiguous.
+func (s *Store) resequenceColumns(ctx context.Context, projectID string) error {
+	cols, err := s.ListColumns(ctx, projectID)
 	if err != nil {
 		return err
 	}
-	if a, _ := res.RowsAffected(); a == 0 {
-		return ErrNotFound
+	for i, c := range cols {
+		if c.Position == i {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE board_columns SET position = ? WHERE id = ?`, i, c.ID); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -353,22 +445,43 @@ type CardFilter struct {
 	ParentID *string
 }
 
-func (s *Store) lastColumnID(ctx context.Context, projectID string) (string, error) {
-	var id string
-	err := s.db.QueryRowContext(ctx, `SELECT id FROM board_columns WHERE project_id = ? ORDER BY position DESC LIMIT 1`, projectID).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
+// doneColumns returns the ids of the project's columns that count as
+// completed. Cards in any of them are "done" for epic progress.
+func (s *Store) doneColumns(ctx context.Context, projectID string) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM board_columns WHERE project_id = ? AND is_done = 1`, projectID)
+	if err != nil {
+		return nil, err
 	}
-	return id, err
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) subProgress(ctx context.Context, projectID string) (map[string][2]int, error) {
 	m := map[string][2]int{}
-	lastCol, err := s.lastColumnID(ctx, projectID)
-	if err != nil || lastCol == "" {
-		return m, nil
+	done, err := s.doneColumns(ctx, projectID)
+	if err != nil {
+		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT parent_id, COUNT(*), SUM(CASE WHEN column_id = ? THEN 1 ELSE 0 END) FROM cards WHERE project_id = ? AND parent_id IS NOT NULL GROUP BY parent_id`, lastCol, projectID)
+	args := []any{}
+	doneExpr := "0"
+	if len(done) > 0 {
+		placeholders := make([]string, 0, len(done))
+		for id := range done {
+			placeholders = append(placeholders, "?")
+			args = append(args, id)
+		}
+		doneExpr = "CASE WHEN column_id IN (" + strings.Join(placeholders, ", ") + ") THEN 1 ELSE 0 END"
+	}
+	args = append(args, projectID)
+	rows, err := s.db.QueryContext(ctx, `SELECT parent_id, COUNT(*), SUM(`+doneExpr+`) FROM cards WHERE project_id = ? AND parent_id IS NOT NULL GROUP BY parent_id`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -444,6 +557,8 @@ type NewCard struct {
 	Priority    model.Priority
 	Type        model.CardType
 	ParentID    *string
+	// Position is the 0-based index within the target column. Nil appends.
+	Position *int
 }
 
 func (s *Store) CreateCard(ctx context.Context, in NewCard) (*model.BoardCard, error) {
@@ -523,13 +638,20 @@ func (s *Store) CreateCard(ctx context.Context, in NewCard) (*model.BoardCard, e
 		cardType = model.CardTypeTask
 	}
 
-	var maxPos sql.NullInt64
-	if err := s.db.QueryRowContext(ctx, `SELECT MAX(position) FROM cards WHERE column_id = ?`, columnID).Scan(&maxPos); err != nil {
+	siblings, err := s.columnCardIDs(ctx, columnID, "")
+	if err != nil {
 		return nil, err
 	}
-	pos := 0
-	if maxPos.Valid {
-		pos = int(maxPos.Int64) + 1
+	pos := len(siblings)
+	if in.Position != nil {
+		if *in.Position < 0 || *in.Position > len(siblings) {
+			return nil, fmt.Errorf("%w: position %d out of range (0-%d)", ErrInvalid, *in.Position, len(siblings))
+		}
+		pos = *in.Position
+		// Make room by pushing everything at or after pos down one slot.
+		if _, err := s.db.ExecContext(ctx, `UPDATE cards SET position = position + 1 WHERE column_id = ? AND position >= ?`, columnID, pos); err != nil {
+			return nil, err
+		}
 	}
 
 	var number int
@@ -556,6 +678,7 @@ func (s *Store) CreateCard(ctx context.Context, in NewCard) (*model.BoardCard, e
 	if err != nil {
 		return nil, err
 	}
+	s.notify(projectID, "board")
 	return &model.BoardCard{Card: *c}, nil
 }
 
@@ -576,7 +699,10 @@ func (s *Store) GetCardDetail(ctx context.Context, id string) (*model.CardDetail
 	}
 	detail.Relationships = rels
 	if c.Type == model.CardTypeEpic {
-		lastCol, _ := s.lastColumnID(ctx, c.ProjectID)
+		doneCols, err := s.doneColumns(ctx, c.ProjectID)
+		if err != nil {
+			return nil, err
+		}
 		progress, err := s.subProgress(ctx, c.ProjectID)
 		if err != nil {
 			return nil, err
@@ -606,7 +732,7 @@ func (s *Store) GetCardDetail(ctx context.Context, id string) (*model.CardDetail
 			}
 			sc.CreatedAt, _ = time.Parse(time.RFC3339, created)
 			sc.UpdatedAt, _ = time.Parse(time.RFC3339, updated)
-			detail.Subcards = append(detail.Subcards, model.Subcard{Card: sc, ColumnName: colName, Done: lastCol != "" && sc.ColumnID == lastCol})
+			detail.Subcards = append(detail.Subcards, model.Subcard{Card: sc, ColumnName: colName, Done: doneCols[sc.ColumnID]})
 		}
 		if err := rows.Err(); err != nil {
 			return nil, err
@@ -682,8 +808,37 @@ func (s *Store) UpdateCard(ctx context.Context, id string, u CardUpdate) (*model
 		if _, err := s.db.ExecContext(ctx, `UPDATE cards SET `+strings.Join(set, ", ")+` WHERE id = ?`, args...); err != nil {
 			return nil, err
 		}
+		s.notify(cur.ProjectID, "board")
 	}
 	return s.GetCard(ctx, id)
+}
+
+// columnCardIDs returns the ids of a column's cards ordered by position,
+// optionally skipping one card (the one being moved).
+func (s *Store) columnCardIDs(ctx context.Context, columnID, excludeID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM cards WHERE column_id = ? AND id != ? ORDER BY position`, columnID, excludeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func (s *Store) writePositions(ctx context.Context, ids []string) error {
+	for i, id := range ids {
+		if _, err := s.db.ExecContext(ctx, `UPDATE cards SET position = ? WHERE id = ?`, i, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) MoveCard(ctx context.Context, id, toColumnID string, position *int) (*model.Card, error) {
@@ -713,20 +868,10 @@ func (s *Store) MoveCard(ctx context.Context, id, toColumnID string, position *i
 		return nil, fmt.Errorf("%w: column does not belong to the card's project", ErrInvalid)
 	}
 
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM cards WHERE column_id = ? AND id != ? ORDER BY position`, toColumnID, id)
+	ids, err := s.columnCardIDs(ctx, toColumnID, id)
 	if err != nil {
 		return nil, err
 	}
-	var ids []string
-	for rows.Next() {
-		var i string
-		if err := rows.Scan(&i); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		ids = append(ids, i)
-	}
-	rows.Close()
 
 	insertAt := len(ids)
 	if position != nil {
@@ -741,47 +886,46 @@ func (s *Store) MoveCard(ctx context.Context, id, toColumnID string, position *i
 		}
 	}
 	ids = append(ids[:insertAt], append([]string{id}, ids[insertAt:]...)...)
-	for i, cid := range ids {
-		if _, err := s.db.ExecContext(ctx, `UPDATE cards SET position = ? WHERE id = ?`, i, cid); err != nil {
-			return nil, err
-		}
+	if err := s.writePositions(ctx, ids); err != nil {
+		return nil, err
 	}
 
 	if fromColumn != toColumnID {
-		rows2, err := s.db.QueryContext(ctx, `SELECT id FROM cards WHERE column_id = ? ORDER BY position`, fromColumn)
+		rest, err := s.columnCardIDs(ctx, fromColumn, id)
 		if err != nil {
 			return nil, err
 		}
-		var rest []string
-		for rows2.Next() {
-			var i string
-			if err := rows2.Scan(&i); err != nil {
-				rows2.Close()
-				return nil, err
-			}
-			rest = append(rest, i)
-		}
-		rows2.Close()
-		for i, cid := range rest {
-			if _, err := s.db.ExecContext(ctx, `UPDATE cards SET position = ? WHERE id = ?`, i, cid); err != nil {
-				return nil, err
-			}
+		if err := s.writePositions(ctx, rest); err != nil {
+			return nil, err
 		}
 	}
 
+	s.notify(cardProject, "board")
 	return s.GetCard(ctx, id)
 }
 
 func (s *Store) DeleteCard(ctx context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.db.ExecContext(ctx, `DELETE FROM cards WHERE id = ?`, id)
+	var projectID, columnID string
+	err := s.db.QueryRowContext(ctx, `SELECT project_id, column_id FROM cards WHERE id = ?`, id).Scan(&projectID, &columnID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM cards WHERE id = ?`, id); err != nil {
+		return err
 	}
+	ids, err := s.columnCardIDs(ctx, columnID, id)
+	if err != nil {
+		return err
+	}
+	if err := s.writePositions(ctx, ids); err != nil {
+		return err
+	}
+	s.notify(projectID, "board")
 	return nil
 }
 
@@ -820,7 +964,8 @@ func (s *Store) AddUpdate(ctx context.Context, cardID, content string) (*model.U
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, err := s.GetCard(ctx, cardID); err != nil {
+	card, err := s.GetCard(ctx, cardID)
+	if err != nil {
 		return nil, err
 	}
 	id := newID()
@@ -830,6 +975,7 @@ func (s *Store) AddUpdate(ctx context.Context, cardID, content string) (*model.U
 	}
 	u := model.Update{ID: id, CardID: cardID, Content: content}
 	u.CreatedAt, _ = time.Parse(time.RFC3339, ts)
+	s.notify(card.ProjectID, "board")
 	return &u, nil
 }
 
@@ -899,6 +1045,7 @@ func (s *Store) AddRelationship(ctx context.Context, sourceID, targetID string, 
 	}
 	r := model.Relationship{ID: id, SourceID: sourceID, TargetID: targetID, Type: relType}
 	r.CreatedAt, _ = time.Parse(time.RFC3339, ts)
+	s.notify(src.ProjectID, "board")
 	return &r, nil
 }
 
@@ -932,12 +1079,17 @@ func (s *Store) cardRelationships(ctx context.Context, cardID string) ([]model.R
 func (s *Store) DeleteRelationship(ctx context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.db.ExecContext(ctx, `DELETE FROM relationships WHERE id = ?`, id)
+	var projectID string
+	err := s.db.QueryRowContext(ctx, `SELECT c.project_id FROM relationships r JOIN cards c ON c.id = r.source_id WHERE r.id = ?`, id).Scan(&projectID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM relationships WHERE id = ?`, id); err != nil {
+		return err
 	}
+	s.notify(projectID, "board")
 	return nil
 }

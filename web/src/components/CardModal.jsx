@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { api } from '../api.js'
+import { useLiveUpdates } from '../useLiveUpdates.js'
 
 const PRIORITIES = ['low', 'medium', 'high', 'urgent']
 const REL_TYPES = [
@@ -7,6 +8,12 @@ const REL_TYPES = [
   ['depends_on', 'depends on'],
   ['relates_to', 'relates to'],
 ]
+
+// Native <select> widens itself to its longest option; keep labels short so
+// the control stays inside the modal.
+function truncate(text, max = 40) {
+  return text.length > max ? text.slice(0, max - 1) + '…' : text
+}
 
 function relLabel(rc) {
   const other = `#${rc.number} ${rc.title}`
@@ -23,7 +30,7 @@ export default function CardModal({ initial, columns, cards, onClose, onChanged,
   const [description, setDescription] = useState('')
   const [complexity, setComplexity] = useState(1)
   const [priority, setPriority] = useState('medium')
-  const [type, setType] = useState(isCreate ? initial.cardType : 'task')
+  const [type, setType] = useState(initial.cardType ?? 'task')
   const [detail, setDetail] = useState(null)
   const [subTitle, setSubTitle] = useState('')
   const [subColumn, setSubColumn] = useState('')
@@ -32,22 +39,35 @@ export default function CardModal({ initial, columns, cards, onClose, onChanged,
   const [relTarget, setRelTarget] = useState('')
   const [error, setError] = useState('')
 
+  // withForm is false for background refreshes so a change coming in over SSE
+  // never overwrites what the user is currently typing.
+  const loadDetail = useCallback(
+    async (withForm) => {
+      try {
+        const d = await api.card(initial.cardId)
+        setDetail(d)
+        if (withForm) {
+          setTitle(d.card.title)
+          setDescription(d.card.description)
+          setComplexity(d.card.complexity)
+          setPriority(d.card.priority)
+          setType(d.card.type)
+          setSubColumn(d.card.column_id)
+        }
+      } catch (e) {
+        setError(e.message)
+      }
+    },
+    [initial.cardId],
+  )
+
   useEffect(() => {
     if (isCreate) return
     setDetail(null)
-    api
-      .card(initial.cardId)
-      .then((d) => {
-        setDetail(d)
-        setTitle(d.card.title)
-        setDescription(d.card.description)
-        setComplexity(d.card.complexity)
-        setPriority(d.card.priority)
-        setType(d.card.type)
-        setSubColumn(d.card.column_id)
-      })
-      .catch((e) => setError(e.message))
-  }, [initial, isCreate])
+    loadDetail(true)
+  }, [isCreate, loadDetail])
+
+  useLiveUpdates(initial.projectId, () => loadDetail(false), { enabled: !isCreate })
 
   async function submit(e) {
     e.preventDefault()
@@ -112,7 +132,7 @@ export default function CardModal({ initial, columns, cards, onClose, onChanged,
   }
 
   async function refresh() {
-    setDetail(await api.card(initial.cardId))
+    await loadDetail(false)
   }
 
   async function addComment() {
@@ -275,15 +295,15 @@ export default function CardModal({ initial, columns, cards, onClose, onChanged,
                 <div className="muted">No relationships yet.</div>
               )}
               <div className="section-form">
-                <select value={relType} onChange={(e) => setRelType(e.target.value)}>
+                <select className="rel-type" value={relType} onChange={(e) => setRelType(e.target.value)}>
                   {REL_TYPES.map(([value, label]) => (
                     <option key={value} value={value}>{label}</option>
                   ))}
                 </select>
-                <select value={relTarget} onChange={(e) => setRelTarget(e.target.value)}>
+                <select className="rel-target" value={relTarget} onChange={(e) => setRelTarget(e.target.value)}>
                   <option value="">Link to…</option>
                   {targetCards.map((c) => (
-                    <option key={c.id} value={c.id}>#{c.number} {c.title}</option>
+                    <option key={c.id} value={c.id}>#{c.number} {truncate(c.title)}</option>
                   ))}
                 </select>
                 <button type="button" disabled={!relTarget} onClick={addRelationship}>Add</button>

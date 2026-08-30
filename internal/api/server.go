@@ -3,7 +3,9 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"time"
 
 	"kanban-mcp/internal/model"
 	"kanban-mcp/internal/store"
@@ -16,6 +18,7 @@ type handlers struct {
 func Register(mux *http.ServeMux, s *store.Store) {
 	h := &handlers{store: s}
 	mux.HandleFunc("GET /api/health", h.health)
+	mux.HandleFunc("GET /api/events", h.events)
 	mux.HandleFunc("GET /api/projects", h.listProjects)
 	mux.HandleFunc("POST /api/projects", h.createProject)
 	mux.HandleFunc("GET /api/projects/{id}", h.getProject)
@@ -62,6 +65,49 @@ func decode(r *http.Request, v any) error {
 
 func (h *handlers) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"status": "ok"})
+}
+
+// events streams change notifications as Server-Sent Events so the UI can
+// refresh without polling. Pass ?project_id= to only receive events for one
+// project; omit it to receive every event.
+func (h *handlers) events(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	ch, unsubscribe := h.store.Subscribe(r.URL.Query().Get("project_id"))
+	defer unsubscribe()
+
+	fmt.Fprint(w, ": connected\n\n")
+	flusher.Flush()
+
+	// Comment lines keep proxies and browsers from dropping an idle stream.
+	ping := time.NewTicker(25 * time.Second)
+	defer ping.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case ev := <-ch:
+			payload, err := json.Marshal(ev)
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, payload)
+			flusher.Flush()
+		case <-ping.C:
+			fmt.Fprint(w, ": ping\n\n")
+			flusher.Flush()
+		}
+	}
 }
 
 type createProjectReq struct {
@@ -158,6 +204,7 @@ func (h *handlers) createColumn(w http.ResponseWriter, r *http.Request) {
 type patchColumnReq struct {
 	Name     *string `json:"name"`
 	Position *int    `json:"position"`
+	IsDone   *bool   `json:"is_done"`
 }
 
 func (h *handlers) updateColumn(w http.ResponseWriter, r *http.Request) {
@@ -166,7 +213,11 @@ func (h *handlers) updateColumn(w http.ResponseWriter, r *http.Request) {
 		fail(w, store.ErrInvalid)
 		return
 	}
-	col, err := h.store.UpdateColumn(r.Context(), r.PathValue("id"), req.Name, nil, req.Position)
+	col, err := h.store.UpdateColumn(r.Context(), r.PathValue("id"), store.ColumnUpdate{
+		Name:     req.Name,
+		Position: req.Position,
+		IsDone:   req.IsDone,
+	})
 	if err != nil {
 		fail(w, err)
 		return
@@ -211,6 +262,7 @@ type createCardReq struct {
 	Priority    model.Priority `json:"priority"`
 	Type        model.CardType `json:"type"`
 	ParentID    *string        `json:"parent_id"`
+	Position    *int           `json:"position"`
 }
 
 func (h *handlers) createCard(w http.ResponseWriter, r *http.Request) {
@@ -228,6 +280,7 @@ func (h *handlers) createCard(w http.ResponseWriter, r *http.Request) {
 		Priority:    req.Priority,
 		Type:        req.Type,
 		ParentID:    req.ParentID,
+		Position:    req.Position,
 	})
 	if err != nil {
 		fail(w, err)

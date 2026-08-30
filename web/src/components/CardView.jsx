@@ -1,24 +1,16 @@
-export default function CardView({ card, draggingId, onOpen, onDropBefore, onDragStart, onDragEnd }) {
+export default function CardView({ card, dragging, onOpen, onDragStart, onDragEnd }) {
   const isEpic = card.type === 'epic'
   return (
     <div
-      className={'card' + (isEpic ? ' epic' : '') + (draggingId === card.id ? ' dragging' : '')}
+      className={'card' + (isEpic ? ' epic' : '') + (dragging ? ' dragging' : '')}
+      data-card-id={card.id}
       draggable
       onDragStart={(e) => {
         e.dataTransfer.effectAllowed = 'move'
         e.dataTransfer.setData('text/plain', card.id)
-        onDragStart(card.id)
+        onDragStart()
       }}
       onDragEnd={onDragEnd}
-      onDragOver={(e) => {
-        e.preventDefault()
-        e.stopPropagation()
-      }}
-      onDrop={(e) => {
-        e.preventDefault()
-        e.stopPropagation()
-        if (draggingId && card.id !== draggingId) onDropBefore()
-      }}
       onClick={onOpen}
     >
       <div className="card-top">

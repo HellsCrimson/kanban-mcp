@@ -1,7 +1,9 @@
 import { useState } from 'react'
 import { api } from '../api.js'
+import { useLiveUpdates } from '../useLiveUpdates.js'
 
 export default function ProjectList({ projects, error, onSelect, onChanged }) {
+  useLiveUpdates(null, onChanged)
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [busy, setBusy] = useState(false)

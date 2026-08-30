@@ -11,6 +11,7 @@
   --muted: #8a93a5;
   --accent: #4f8cff;
   --danger: #ef4444;
+  --done: #34d399;
 }
 
 html,
@@ -244,12 +245,51 @@ textarea {
   outline-offset: -2px;
 }
 
+.column.dragging {
+  opacity: 0.4;
+}
+
+/* Insertion marker for a column being reordered. */
+.column.col-drop-before {
+  box-shadow: inset 3px 0 0 0 var(--accent);
+}
+
+.column.col-drop-after {
+  box-shadow: inset -3px 0 0 0 var(--accent);
+}
+
+.column.done-column .column-header {
+  border-bottom-color: var(--done);
+}
+
 .column-header {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--border);
+}
+
+.drag-handle {
+  color: var(--muted);
+  cursor: grab;
+  font-size: 13px;
+  line-height: 1;
+  user-select: none;
+}
+
+.done-toggle {
+  font-size: 12px;
+  opacity: 0.35;
+}
+
+.done-toggle:hover {
+  opacity: 0.8;
+}
+
+.done-toggle.active {
+  color: var(--done);
+  opacity: 1;
 }
 
 .column-name {
@@ -286,6 +326,16 @@ textarea {
 .column-dropzone {
   flex: 1;
   min-height: 8px;
+}
+
+/* Sits in the card list at the slot the dragged card would land in. Negative
+   margins absorb most of the list gap so the column barely shifts. */
+.drop-indicator {
+  height: 2px;
+  margin: -4px 0;
+  border-radius: 2px;
+  background: var(--accent);
+  pointer-events: none;
 }
 
 .column-footer {
@@ -509,7 +559,8 @@ textarea {
 
 .subcard-form select {
   width: auto;
-  flex-shrink: 0;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 /* Updates & relationships */
@@ -558,7 +609,15 @@ textarea {
 
 .section-form select {
   width: auto;
-  flex: 1;
+  flex: 1 1 0;
+  /* Without this a <select> refuses to shrink below its widest option and
+     pushes itself out of the modal. */
+  min-width: 0;
+}
+
+.section-form .rel-type {
+  flex: 0 1 auto;
+  max-width: 40%;
 }
 
 .section-form button {

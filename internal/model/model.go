@@ -16,6 +16,9 @@ type Column struct {
 	ProjectID string `json:"project_id"`
 	Name      string `json:"name"`
 	Position  int    `json:"position"`
+	// IsDone marks the column as a terminal state: cards in it count as
+	// completed for epic progress. A project can have several.
+	IsDone bool `json:"is_done"`
 }
 
 type CardType string

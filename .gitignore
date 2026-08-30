@@ -3,3 +3,4 @@
 *.db-wal
 /kanban
 node_modules
+internal/webui/dist

@@ -26,7 +26,7 @@ func NewHandler(s *store.Store) http.Handler {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "get_project",
-		Description: "Get a project's full board state: all columns and all cards in each column.",
+		Description: "Get a project's full board state: all columns (with their is_done flag) and all cards in each column.",
 	}, t.getProject)
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -41,8 +41,10 @@ func NewHandler(s *store.Store) http.Handler {
 	}, t.addColumn)
 
 	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "update_column",
-		Description: "Rename a column and/or change its position. Position is the 0-based index among the project's columns.",
+		Name: "update_column",
+		Description: "Rename a column, change its position and/or mark it as a done column. " +
+			"Position is the 0-based index among the project's columns. " +
+			"is_done marks the column as a terminal state: cards in it count as completed for epic progress. A project can have several done columns.",
 	}, t.updateColumn)
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -59,7 +61,8 @@ func NewHandler(s *store.Store) http.Handler {
 		Name: "create_card",
 		Description: "Create a card in a project. Type is 'task' (default) or 'epic'. " +
 			"To create a sub-card of an epic, set parent_id to the epic's id; sub-cards are always tasks and can be moved independently. " +
-			"column_id defaults to the first column. complexity is 1-10 (default 1), priority is low|medium|high|urgent (default medium).",
+			"column_id defaults to the first column. complexity is 1-10 (default 1), priority is low|medium|high|urgent (default medium). " +
+			"position is the 0-based index within the column; omit it to append at the end.",
 	}, t.createCard)
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -183,10 +186,15 @@ type updateColumnIn struct {
 	ColumnID string  `json:"column_id"`
 	Name     *string `json:"name,omitempty"`
 	Position *int    `json:"position,omitempty"`
+	IsDone   *bool   `json:"is_done,omitempty"`
 }
 
 func (t *tools) updateColumn(ctx context.Context, _ *mcp.CallToolRequest, in updateColumnIn) (*mcp.CallToolResult, *model.Column, error) {
-	c, err := t.store.UpdateColumn(ctx, in.ColumnID, in.Name, nil, in.Position)
+	c, err := t.store.UpdateColumn(ctx, in.ColumnID, store.ColumnUpdate{
+		Name:     in.Name,
+		Position: in.Position,
+		IsDone:   in.IsDone,
+	})
 	return nil, c, err
 }
 
@@ -229,6 +237,7 @@ type createCardIn struct {
 	Priority    *model.Priority `json:"priority,omitempty"`
 	Type        *model.CardType `json:"type,omitempty"`
 	ParentID    *string         `json:"parent_id,omitempty"`
+	Position    *int            `json:"position,omitempty"`
 }
 
 func (t *tools) createCard(ctx context.Context, _ *mcp.CallToolRequest, in createCardIn) (*mcp.CallToolResult, *model.BoardCard, error) {
@@ -241,6 +250,7 @@ func (t *tools) createCard(ctx context.Context, _ *mcp.CallToolRequest, in creat
 		Priority:    prio(in.Priority),
 		Type:        ct(in.Type),
 		ParentID:    in.ParentID,
+		Position:    in.Position,
 	})
 	return nil, c, err
 }
