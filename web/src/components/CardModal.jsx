@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { useLiveUpdates } from '../useLiveUpdates.js'
+import Markdown from './Markdown.jsx'
 
 const PRIORITIES = ['low', 'medium', 'high', 'urgent']
 const REL_TYPES = [
@@ -13,6 +14,19 @@ const REL_TYPES = [
 // the control stays inside the modal.
 function truncate(text, max = 40) {
   return text.length > max ? text.slice(0, max - 1) + '…' : text
+}
+
+// A description grows with what is written in it: the textarea follows its own
+// content instead of staying at a fixed row count (CSS caps it, then it scrolls).
+function AutoTextarea({ value, minHeight, ...props }) {
+  const ref = useRef(null)
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = Math.max(el.scrollHeight, minHeight) + 'px'
+  }, [value, minHeight])
+  return <textarea ref={ref} value={value} {...props} />
 }
 
 function relLabel(rc) {
@@ -38,6 +52,9 @@ export default function CardModal({ initial, columns, cards, onClose, onChanged,
   const [relType, setRelType] = useState('blocks')
   const [relTarget, setRelTarget] = useState('')
   const [error, setError] = useState('')
+  // New cards open straight into the editor; existing ones show the rendered
+  // description until you ask to edit it.
+  const [editingDesc, setEditingDesc] = useState(isCreate)
 
   // withForm is false for background refreshes so a change coming in over SSE
   // never overwrites what the user is currently typing.
@@ -211,10 +228,31 @@ export default function CardModal({ initial, columns, cards, onClose, onChanged,
             </label>
           </div>
 
-          <label>
-            Description
-            <textarea rows="4" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Details, acceptance criteria…" />
-          </label>
+          <div className="field">
+            <div className="field-label">
+              <span>Description</span>
+              <button type="button" className="ghost small" onClick={() => setEditingDesc((v) => !v)}>
+                {editingDesc ? 'Preview' : 'Edit'}
+              </button>
+            </div>
+            {editingDesc ? (
+              <AutoTextarea
+                minHeight={180}
+                className="description-input"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="Details, acceptance criteria… (Markdown supported)"
+              />
+            ) : (
+              <div className="description-view" onDoubleClick={() => setEditingDesc(true)}>
+                {description.trim() ? (
+                  <Markdown text={description} />
+                ) : (
+                  <span className="muted">No description yet — double-click to add one.</span>
+                )}
+              </div>
+            )}
+          </div>
 
           {!isCreate && isEpic && detail && (
             <div className="subcards">
